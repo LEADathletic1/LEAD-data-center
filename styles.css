@@ -117,6 +117,7 @@ button:disabled { cursor: not-allowed; }
 .link-muted { color: var(--muted); font-size: 13px; }
 button:disabled.btn-ghost, button:disabled.btn-outline, button:disabled.btn-outline-soft, button:disabled.chip-btn { opacity: 0.5; }
 .input { background: var(--page); border: 1px solid var(--line-3); border-radius: 2px; padding: 9px 14px; color: var(--text); font-size: 13px; width: 200px; font-family: inherit; }
+.input.wide { width: 100%; padding: 14px 16px; font-size: 16px; }
 .input.compact { padding: 8px 14px; width: 170px; }
 .input.search { width: 100%; background: var(--panel); border-color: var(--accent); padding: 16px 20px; font-size: 16px; }
 .chip { display: inline-flex; align-items: center; gap: 10px; font-size: 12px; padding: 7px 14px; border-radius: 2px; }

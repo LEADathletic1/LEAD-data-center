@@ -42,7 +42,7 @@ test('the repo holds no athlete data or secrets', () => {
   const ignore = readFileSync(join(root, '.gitignore'), 'utf8');
   for (const line of ['*.csv', 'data/', '.env']) assert.ok(ignore.split('\n').includes(line), line + ' is ignored');
   const config = readFileSync(join(root, 'config.js'), 'utf8');
-  assert.match(config, /REPLACE_WITH_GOOGLE_CLIENT_ID/);
+  assert.doesNotMatch(config, /(password|secret)\s*[:=]/i, 'no password in the repo');
   assert.match(config, /REPLACE_WITH_APPS_SCRIPT_WEB_APP_URL/);
   const tracked = walk(root).filter((f) => !/node_modules|\.git\//.test(f));
   assert.deepEqual(tracked.filter((f) => /\.csv$/i.test(f)), []);

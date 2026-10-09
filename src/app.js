@@ -26,16 +26,16 @@ function gateError(title, message, extra) {
   mountGate(root, { title, body: message, extra });
 }
 
-async function enter(email) {
-  state.user = email;
+async function enter(label) {
+  state.user = label;
   try {
     setLibrary((await api.getLibrary()));
   } catch (e) {
     if (e.code === 'auth' || e.code === 'auth_expired') { showSignIn(e.code === 'auth_expired' ? e.message : ''); return; }
-    gateError('Could not load the library', e.message, h('button', { type: 'button', class: 'btn-outline mono', onclick: () => enter(email) }, 'TRY AGAIN'));
+    gateError('Could not load the library', e.message, h('button', { type: 'button', class: 'btn-outline mono', onclick: () => enter(label) }, 'TRY AGAIN'));
     return;
   }
-  shell = mountShell(root, { email, mock: state.mock, onSignOut: signOut });
+  shell = mountShell(root, { email: label, mock: state.mock, onSignOut: signOut });
   if (!ROUTES[location.hash]) history.replaceState(null, '', '#/upload');
   route();
 }
@@ -50,24 +50,27 @@ function signOut() {
 
 function showSignIn(message) {
   shell = null;
-  const holder = h('div', { class: 'gsi-holder' });
-  const card = mountGate(root, { title: 'Sign in', body: 'Sign in with your LEAD Google account to open the data center.', extra: holder });
-  if (message) card.appendChild(h('p', { class: 'mono error-text', role: 'alert' }, message));
-  try { auth.renderSignInButton(holder); } catch { card.appendChild(h('p', { class: 'mono error-text' }, 'Google sign-in did not load. Refresh the page.')); }
-}
-
-async function onToken(token) {
-  const email = auth.emailFromToken(token);
-  try {
-    const who = await api.whoami();
-    await enter(who.email || email);
-  } catch (e) {
-    if (e.code === 'auth') {
-      // Signed in with Google, but not on the allow list. Show nothing else.
-      mountGate(root, { title: 'This account does not have access', body: email ? 'Signed in as ' + email + '.' : '', extra: h('button', { type: 'button', class: 'btn-outline mono', onclick: signOut }, 'SIGN OUT') });
-    } else if (e.code === 'auth_expired') showSignIn(e.message);
-    else gateError('Could not reach the data center', e.message, h('button', { type: 'button', class: 'btn-outline mono', onclick: () => onToken(token) }, 'TRY AGAIN'));
-  }
+  let busy = false;
+  const err = h('p', { class: 'mono error-text', role: 'alert' }, message || '');
+  const input = h('input', { type: 'password', class: 'input wide', autocomplete: 'current-password', 'aria-label': 'Password', placeholder: 'Password', required: true, maxlength: '200' });
+  const button = h('button', { type: 'submit', class: 'btn-primary' }, 'Sign in');
+  const form = h('form', { class: 'stack', novalidate: true, onsubmit: async (e) => {
+    e.preventDefault();
+    if (busy || !input.value) return;
+    busy = true; button.disabled = true; err.textContent = '';
+    try {
+      await api.login(input.value);
+      input.value = '';
+      await enter('Signed in');
+    } catch (ex) {
+      err.textContent = ex.message;
+      input.value = '';
+      input.focus();
+    }
+    busy = false; button.disabled = false;
+  } }, input, err, button);
+  mountGate(root, { title: 'Sign in', body: 'Enter the LEAD Data Center password.', extra: form });
+  input.focus();
 }
 
 async function boot() {
@@ -79,18 +82,11 @@ async function boot() {
     await enter('mock@example.test');
     return;
   }
-  if (!auth.isConfigured()) {
-    gateError('Not configured yet', 'GOOGLE_CLIENT_ID and SCRIPT_URL in config.js are still placeholders. Follow SETUP.md, then reload. To explore the screens with synthetic data, open this page from localhost with ?mock=1.');
+  if (!api.isConfigured()) {
+    gateError('Not configured yet', 'SCRIPT_URL in config.js is still a placeholder. Follow SETUP.md, then reload. To explore the screens with synthetic data, open this page from localhost with ?mock=1.');
     return;
   }
-  try {
-    await auth.initAuth(onToken);
-  } catch (e) {
-    gateError('Sign-in unavailable', e.message);
-    return;
-  }
-  const saved = auth.storedToken();
-  if (saved) onToken(saved); else showSignIn('');
+  if (auth.storedToken()) await enter('Signed in'); else showSignIn('');
 }
 
 boot();

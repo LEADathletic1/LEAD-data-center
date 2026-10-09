@@ -6,12 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-export const CLIENT_ID = 'test-client.apps.googleusercontent.com';
-
-export function jwtLike(payload) {
-  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
-  return b64({ alg: 'RS256' }) + '.' + b64(payload) + '.sig' + crypto.randomBytes(4).toString('hex');
-}
+export const PASSWORD = 'correct horse battery staple';
 
 class FakeRange {
   constructor(sheet, r, c, nr, nc) { Object.assign(this, { sheet, r, c, nr, nc }); }
@@ -51,13 +46,13 @@ class FakeSheet {
   dataRows() { return this.cells.slice(1).filter((r) => r && r.length); }
 }
 
-export function createGas({ allowed = 'info@trainatlead.com,blair@trainatlead.com', archive = true } = {}) {
+export function createGas({ password = PASSWORD, archive = true } = {}) {
   const sheets = new Map();
-  const props = { CLIENT_ID, ALLOWED_EMAILS: allowed };
+  const props = {};
+  if (password !== null) props.APP_PASSWORD = password;
   if (archive) props.ARCHIVE_FOLDER_ID = 'archive-folder';
   const cacheStore = new Map();
-  const tokens = new Map(); // token -> { code, body }
-  const state = { fetchCalls: 0, archived: [], locked: false, lockFails: false, lockCalls: 0 };
+  const state = { archived: [], locked: false, lockFails: false, lockCalls: 0 };
 
   const Utilities = {
     computeDigest: (_alg, s) => Array.from(crypto.createHash('sha256').update(s).digest()),
@@ -78,15 +73,7 @@ export function createGas({ allowed = 'info@trainatlead.com,blair@trainatlead.co
     console: { log() {}, error() {} },
     Date, Math, JSON, Number, String, Array, Object, Map, Set, Error, RegExp, isFinite,
     PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => (k in props ? props[k] : null) }) },
-    CacheService: { getScriptCache: () => ({ get: (k) => cacheStore.get(k) ?? null, put: (k, v) => { cacheStore.set(k, v); } }) },
-    UrlFetchApp: {
-      fetch: (url) => {
-        state.fetchCalls++;
-        const token = decodeURIComponent(url.split('id_token=')[1]);
-        const t = tokens.get(token) || { code: 400, body: { error: 'invalid_token' } };
-        return { getResponseCode: () => t.code, getContentText: () => JSON.stringify(t.body) };
-      },
-    },
+    CacheService: { getScriptCache: () => ({ get: (k) => cacheStore.get(k) ?? null, put: (k, v) => { cacheStore.set(k, v); }, remove: (k) => { cacheStore.delete(k); } }) },
     Utilities,
     LockService: {
       getScriptLock: () => ({
@@ -103,12 +90,11 @@ export function createGas({ allowed = 'info@trainatlead.com,blair@trainatlead.co
   vm.runInContext(readFileSync(join(root, 'apps-script/Code.gs'), 'utf8'), sandbox, { filename: 'Code.gs' });
 
   const call = (body) => JSON.parse(sandbox.doPost({ postData: { contents: typeof body === 'string' ? body : JSON.stringify(body) } }).getContent());
-  const goodToken = (email = 'blair@trainatlead.com', extra = {}) => {
-    const now = Math.floor(Date.now() / 1000);
-    const payload = { aud: CLIENT_ID, iss: 'https://accounts.google.com', email, email_verified: 'true', exp: String(now + 3000), ...extra };
-    const t = jwtLike(payload);
-    tokens.set(t, { code: 200, body: payload });
-    return t;
+  // Signs in with the right password and returns a session token.
+  const goodToken = () => {
+    const r = call({ action: 'login', password: props.APP_PASSWORD });
+    if (!r.ok) throw new Error('test login failed: ' + JSON.stringify(r));
+    return r.token;
   };
-  return { sandbox, sheets, props, state, tokens, call, goodToken, cacheStore };
+  return { sandbox, sheets, props, state, call, goodToken, cacheStore };
 }

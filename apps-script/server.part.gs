@@ -31,14 +31,16 @@ function doGet() {
 function doPost(e) {
   let body;
   try { body = JSON.parse(e.postData.contents); } catch (err) { return json_({ ok: false, error: 'auth' }); }
-  const auth = verifyToken_(body && body.idToken);
+  if (!body || typeof body !== 'object') return json_({ ok: false, error: 'auth' });
+  if (body.action === 'login') return json_(login_(body.password));
+  const auth = verifySession_(body.sessionToken);
   if (!auth.ok) return json_({ ok: false, error: auth.error });
   try {
     switch (body.action) {
-      case 'whoami': return json_({ ok: true, email: auth.email });
+      case 'whoami': return json_({ ok: true });
       case 'getLibrary': return json_(getLibrary_());
-      case 'commitImport': return json_(commitImport_(body, auth.email));
-      case 'setTags': return json_(setTags_(body, auth.email));
+      case 'commitImport': return json_(commitImport_(body, SHARED_USER_));
+      case 'setTags': return json_(setTags_(body, SHARED_USER_));
       case 'mergeAthletes': return json_({ ok: false, error: 'not_implemented' });
       default: return json_({ ok: false, error: 'unknown_action' });
     }
@@ -52,48 +54,51 @@ function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
-// ---------- Auth: runs on every request, no exceptions ----------
+// ---------- Auth: one shared password, checked on the server ----------
+// The password lives in the APP_PASSWORD Script Property. `login` trades it for a random session
+// token (kept in CacheService, 6 hours at most). Every other request must carry a live token.
+// Changing APP_PASSWORD signs everyone out. Repeated wrong guesses lock logins for 15 minutes.
 
-function verifyToken_(token) {
-  if (!token || typeof token !== 'string' || token.length > 4096) return { ok: false, error: 'auth' };
-  const props = PropertiesService.getScriptProperties();
-  const clientId = props.getProperty('CLIENT_ID');
-  const allowed = String(props.getProperty('ALLOWED_EMAILS') || '').split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
-  if (!clientId || !allowed.length) return { ok: false, error: 'auth' };
+const SHARED_USER_ = 'shared-password';
+const MIN_PASSWORD_LENGTH_ = 10;
+const SESSION_TTL_ = 21600; // CacheService maximum
+const MAX_FAILS_ = 5;
+const LOCK_SECONDS_ = 900;
 
-  const now = Math.floor(Date.now() / 1000);
+function login_(password) {
+  const secret = PropertiesService.getScriptProperties().getProperty('APP_PASSWORD');
+  if (!secret || secret.length < MIN_PASSWORD_LENGTH_) return { ok: false, error: 'not_configured' };
   const cache = CacheService.getScriptCache();
-  const cacheKey = 'tok_' + digest_(token);
-  let info = null;
-  const hit = cache.get(cacheKey);
-  if (hit) { try { info = JSON.parse(hit); } catch (err) { info = null; } }
-  if (info && !(info.exp > now)) info = null;
-
-  if (!info) {
-    const resp = UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(token), { muteHttpExceptions: true });
-    if (resp.getResponseCode() !== 200) return { ok: false, error: looksExpired_(token, now) ? 'auth_expired' : 'auth' };
-    let t;
-    try { t = JSON.parse(resp.getContentText()); } catch (err) { return { ok: false, error: 'auth' }; }
-    const exp = Number(t.exp);
-    if (t.aud !== clientId) return { ok: false, error: 'auth' };
-    if (t.iss !== 'accounts.google.com' && t.iss !== 'https://accounts.google.com') return { ok: false, error: 'auth' };
-    if (String(t.email_verified) !== 'true' || !t.email) return { ok: false, error: 'auth' };
-    if (!exp || exp <= now) return { ok: false, error: 'auth_expired' };
-    info = { email: String(t.email).toLowerCase(), exp: exp };
-    cache.put(cacheKey, JSON.stringify(info), Math.max(1, Math.min(300, exp - now)));
+  if (cache.get('login_lock')) return { ok: false, error: 'locked' };
+  if (typeof password !== 'string' || password.length > 200 || !safeEqual_(password, secret)) {
+    const fails = Number(cache.get('login_fails') || 0) + 1;
+    if (fails >= MAX_FAILS_) { cache.put('login_lock', '1', LOCK_SECONDS_); cache.remove('login_fails'); }
+    else cache.put('login_fails', String(fails), LOCK_SECONDS_);
+    return { ok: false, error: 'auth' };
   }
-  // The allow list is checked on every request, including cache hits.
-  if (allowed.indexOf(info.email) < 0) return { ok: false, error: 'auth' };
-  return { ok: true, email: info.email };
+  cache.remove('login_fails');
+  const token = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');
+  cache.put('sess_' + digest_(token), digest_(secret), SESSION_TTL_);
+  return { ok: true, token: token };
 }
 
-// Only used to choose between "auth" and "auth_expired"; the token is not trusted for anything else.
-function looksExpired_(token, now) {
-  try {
-    const part = token.split('.')[1];
-    const payload = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(part)).getDataAsString());
-    return Number(payload.exp) > 0 && Number(payload.exp) <= now;
-  } catch (err) { return false; }
+function verifySession_(token) {
+  if (!token || typeof token !== 'string' || token.length > 200) return { ok: false, error: 'auth' };
+  const secret = PropertiesService.getScriptProperties().getProperty('APP_PASSWORD');
+  if (!secret || secret.length < MIN_PASSWORD_LENGTH_) return { ok: false, error: 'auth' };
+  const stored = CacheService.getScriptCache().get('sess_' + digest_(token));
+  // A missing session may be an expired one, so ask the page to sign in again. No data either way.
+  if (!stored) return { ok: false, error: 'auth_expired' };
+  // The session is bound to the password it was issued under, so changing the password ends it.
+  if (!safeEqual_(stored, digest_(secret))) return { ok: false, error: 'auth_expired' };
+  return { ok: true };
+}
+
+function safeEqual_(a, b) {
+  const x = digest_(String(a)), y = digest_(String(b));
+  let diff = x.length ^ y.length;
+  for (let i = 0; i < x.length && i < y.length; i++) diff |= x.charCodeAt(i) ^ y.charCodeAt(i);
+  return diff === 0;
 }
 
 function digest_(s) {

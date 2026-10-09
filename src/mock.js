@@ -29,7 +29,7 @@ export function createMockBackend() {
   applyChanges(lib, computeSetTags(lib, { athlete_ids: some, add: ['1More'], remove: [] }, ctx()).changes);
 
   return {
-    async whoami() { await delay(60); return { ok: true, email: MOCK_EMAIL }; },
+    async whoami() { await delay(60); return { ok: true }; },
     async getLibrary() { await delay(120); return { ok: true, ...toClientLibrary(lib) }; },
     async commitImport(payload) {
       await delay(250);
