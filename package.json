@@ -1,0 +1,10 @@
+{
+  "name": "lead-data-center",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build:gas": "node scripts/build-gas.js",
+    "sample": "node scripts/make-sample.js"
+  }
+}

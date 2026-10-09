@@ -1,0 +1,8 @@
+# Never commit athlete data or secrets
+*.csv
+data/
+.env
+.env.*
+node_modules/
+.DS_Store
+.claude/
