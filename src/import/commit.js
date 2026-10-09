@@ -32,7 +32,7 @@ function canonicalTags(rawTags, knownTags) {
 
 // lib: { athletes, points: {tab: [[id,date,time,source,import_id]]}, decisions, tags }
 // payload: { fileName, source, tags, resolutions, athletes: [names], records: [{name,test,date,time}] }
-// ctx: { now, email, importId, newId(): string }
+// ctx: { now, user (display name), importId, newId(): string }
 export function computeCommit(lib, payload, ctx) {
   if (!payload || typeof payload !== 'object') return fail('bad_request');
   const source = String(payload.source || 'lumin');
@@ -92,7 +92,7 @@ export function computeCommit(lib, payload, ctx) {
       idByNorm.set(norm, target.id);
       if (!aliasAdds.has(target.id)) aliasAdds.set(target.id, []);
       aliasAdds.get(target.id).push(name.replace(/\|/g, ' '));
-      decisions.push({ pair_key: pairKey(norm, target.id), athlete_id: target.id, incoming_name: name, decision: 'alias', decided_by: ctx.email, timestamp: ctx.now });
+      decisions.push({ pair_key: pairKey(norm, target.id), athlete_id: target.id, incoming_name: name, decision: 'alias', decided_by: ctx.user, timestamp: ctx.now });
       matchesMerged++;
       continue;
     }
@@ -101,7 +101,7 @@ export function computeCommit(lib, payload, ctx) {
       const declared = new Set(res && res.action === 'new' && Array.isArray(res.different_from) ? res.different_from : []);
       if (!candidates.every((c) => declared.has(c.athlete.id))) { unresolved.push(name); continue; }
       for (const c of candidates) {
-        decisions.push({ pair_key: pairKey(norm, c.athlete.id), athlete_id: c.athlete.id, incoming_name: name, decision: 'different', decided_by: ctx.email, timestamp: ctx.now });
+        decisions.push({ pair_key: pairKey(norm, c.athlete.id), athlete_id: c.athlete.id, incoming_name: name, decision: 'different', decided_by: ctx.user, timestamp: ctx.now });
       }
       matchesAddedAsNew++;
     }
@@ -146,7 +146,7 @@ export function computeCommit(lib, payload, ctx) {
     const old = Number(lib.points[rec.test][hit][2]);
     if (Math.abs(old - rec.time) <= TIME_TOLERANCE) { perTest[rec.test].duplicates++; continue; }
     updatePoints[rec.test].push({ row: hit, time: rec.time });
-    corrections.push([ctx.importId, ctx.now, rec.id, rec.test, rec.date, old, rec.time]);
+    corrections.push([ctx.importId, ctx.now, rec.id, rec.test, rec.date, old, rec.time, ctx.user]);
     perTest[rec.test].corrected++;
   }
 
@@ -173,8 +173,8 @@ export function computeCommit(lib, payload, ctx) {
       updatedAthletes.push({ id, tags: after, aliases });
     }
   }
-  for (const t of tagInfo.created) tagLog.push({ timestamp: ctx.now, user_email: ctx.email, action: 'create', tag: t, athlete_ids: '' });
-  for (const [t, ids] of gained) tagLog.push({ timestamp: ctx.now, user_email: ctx.email, action: 'add', tag: t, athlete_ids: ids.join(',') });
+  for (const t of tagInfo.created) tagLog.push({ timestamp: ctx.now, user_name: ctx.user, action: 'create', tag: t, athlete_ids: '' });
+  for (const [t, ids] of gained) tagLog.push({ timestamp: ctx.now, user_name: ctx.user, action: 'add', tag: t, athlete_ids: ids.join(',') });
 
   let newPoints = 0, duplicates = 0, corrected = 0;
   for (const tab of TEST_TABS) { newPoints += perTest[tab].new; duplicates += perTest[tab].duplicates; corrected += perTest[tab].corrected; }
@@ -188,7 +188,7 @@ export function computeCommit(lib, payload, ctx) {
     perTest,
   };
   const importLog = {
-    import_id: ctx.importId, timestamp: ctx.now, user_email: ctx.email,
+    import_id: ctx.importId, timestamp: ctx.now, user_name: ctx.user,
     file_name: cleanName(payload.fileName || ''), tags_applied: tagInfo.tags.join(', '),
     new_points: newPoints, duplicates_skipped: duplicates, time_corrections: corrected,
     new_athletes: newAthletes.length, matches_merged: matchesMerged, matches_added_as_new: matchesAddedAsNew,
@@ -228,7 +228,7 @@ export function computeSetTags(lib, params, ctx) {
   }
 
   const tagLog = [];
-  for (const t of addInfo.created) tagLog.push({ timestamp: ctx.now, user_email: ctx.email, action: 'create', tag: t, athlete_ids: '' });
+  for (const t of addInfo.created) tagLog.push({ timestamp: ctx.now, user_name: ctx.user, action: 'create', tag: t, athlete_ids: '' });
   const updatedAthletes = [];
   const added = new Map();
   const removed = new Map();
@@ -251,7 +251,7 @@ export function computeSetTags(lib, params, ctx) {
     after = kept;
     if (after.length !== before.length || after.some((t, i) => t !== before[i])) updatedAthletes.push({ id, tags: after });
   }
-  for (const [t, list] of added) tagLog.push({ timestamp: ctx.now, user_email: ctx.email, action: 'add', tag: t, athlete_ids: list.join(',') });
-  for (const [t, list] of removed) tagLog.push({ timestamp: ctx.now, user_email: ctx.email, action: 'remove', tag: t, athlete_ids: list.join(',') });
+  for (const [t, list] of added) tagLog.push({ timestamp: ctx.now, user_name: ctx.user, action: 'add', tag: t, athlete_ids: list.join(',') });
+  for (const [t, list] of removed) tagLog.push({ timestamp: ctx.now, user_name: ctx.user, action: 'remove', tag: t, athlete_ids: list.join(',') });
   return { ok: true, changes: { updatedAthletes, tagLog, createdTags: addInfo.created }, result: { changed: updatedAthletes.length } };
 }

@@ -28,7 +28,7 @@ You will collect these along the way. Keep a scratch note (do not paste the pass
 
 ## 3. Choose the password
 
-Pick a long passphrase, at least 10 characters (4 or 5 random words is ideal). The site is public and the data is about minors, so a short or guessable password is the weak point. Wrong guesses are limited (5 in a row pauses all sign-ins for 15 minutes), but a strong password is still your main protection. You will paste it into Script Properties in the next step. It is never written into the repo or the website.
+Pick a long passphrase, at least 12 characters (4 or 5 random words is ideal). The site is public and the data is about minors, so a short or guessable password is the weak point. Failed logins are slowed down, but a strong password is your main protection. You will paste it into Script Properties in the next step, and the setup function deletes it from there straight away. It is never written into the repo or the website, and only a salted hash is kept.
 
 ## 4. Install the script on the Sheet
 
@@ -39,11 +39,11 @@ Pick a long passphrase, at least 10 characters (4 or 5 random words is ideal). T
 
    | Property | Value |
    |---|---|
-   | `APP_PASSWORD` | the password from step 3 |
+   | `INITIAL_PASSWORD` | the password from step 3 (temporary, deleted in step 5) |
    | `ARCHIVE_FOLDER_ID` | the Raw Uploads folder ID from step 2 |
    | `BACKUP_FOLDER_ID` | the Backups folder ID from step 2 |
 
-5. In the editor, pick the function **`setup`** in the toolbar and click **Run**. Google asks for permission: **Review permissions → choose your account → Advanced → Go to LEAD Data Center (unsafe) → Allow**. (The "unsafe" warning appears because you wrote the script yourself and have not submitted it to Google for review. That is expected.) Afterwards the Sheet has tabs: Athletes, 10 Yard, 30 Yard, Import Log, Corrections, Tag Log, Name Decisions.
+5. In the editor, pick the function **`initSetup`** and click **Run**. It stores the password as a salted hash, generates the session secret, and **deletes `INITIAL_PASSWORD`**. Refresh Script Properties to confirm it is gone and that `PASSWORD_HASH`, `PASSWORD_SALT`, `PASSWORD_VERSION` and `SESSION_SECRET` now exist. Then pick **`setup`** and click **Run** to create the tabs. Google asks for permission: **Review permissions → choose your account → Advanced → Go to LEAD Data Center (unsafe) → Allow**. (The "unsafe" warning appears because you wrote the script yourself and have not submitted it to Google for review. That is expected.) Afterwards the Sheet has tabs: Athletes, 10 Yard, 30 Yard, Import Log, Corrections, Tag Log, Name Decisions.
 
 ## 5. Deploy the web app and copy its URL
 
@@ -83,8 +83,8 @@ A public repo is fine: it holds code only, no data and no secrets. GitHub Pages 
 
 Open `https://data.trainatlead.com`.
 
-1. Enter the password. You should land on Upload.
-2. Sign out, then enter a wrong password. You should see "That password is not correct" and no data. (Don't do this 5 times in a row, or sign-in pauses for 15 minutes.)
+1. Enter your name and the password, then Enter. You should land on Upload with your name in the top bar.
+2. Sign out, then try a wrong password. You should see "Incorrect password" and no data. (Each failure makes the next attempt wait longer, up to 10 seconds.)
 3. Sign in again with the right password.
 4. Make a small **synthetic** test file (invented names only, never real athletes), import it with a tag, and confirm. Check the Sheet: rows appear in the tabs, a row in Import Log, and the raw file in the Raw Uploads folder.
 5. Import the exact same file again. The review screen should show 0 new data points, and the Sheet row counts should not change.
@@ -100,11 +100,13 @@ In the Apps Script editor pick **`installWeeklyBackupTrigger`** and **Run** once
 
 **Before each Lumin purge:** export the CSV from Lumin, open the Data Center, drop the file, add at least one tag, review, decide any name matches, confirm. Check the "authoritative counts" panel afterwards.
 
-**Change the password (or sign everyone out):** Apps Script → Project Settings → Script Properties → edit `APP_PASSWORD`. Takes effect immediately, no redeploy. Every open session ends and must sign in with the new one. Do this whenever someone who knew the password leaves.
+**Change the password:** in the app, Settings → Change Password (current password, then a new one of 12+ characters). This signs everyone out on every device, including you, and they sign in with the new one. Do it whenever someone who knew the password leaves.
 
-**Sessions:** a sign-in lasts up to 6 hours (the Apps Script cache limit), then the page asks for the password again.
+**Forgot the password:** in Apps Script add a Script Property `INITIAL_PASSWORD` with a new password and run `initSetup` again. Existing sessions end, and the property is deleted again.
 
-**Who did what:** with one shared password the logs cannot tell people apart. The `user_email` column in Import Log and Tag Log records `shared-password`.
+**Sessions:** a sign-in lasts 7 days on that browser, or until Sign out or a password change.
+
+**Who did what:** the name typed at sign-in is recorded in the `user_name` column of Import Log, Tag Log and Corrections. It is not verified, so treat it as a convenience, not proof.
 
 **Updating the script:** after any change to the shared logic run `node scripts/build-gas.js`, paste the new `Code.gs`, then **Deploy → Manage deployments → pencil → Version: New version → Deploy**. The URL stays the same.
 
@@ -113,9 +115,9 @@ In the Apps Script editor pick **`installWeeklyBackupTrigger`** and **Run** once
 | Symptom | Likely cause |
 |---|---|
 | "Not configured yet" on the live site | `config.js` still has the placeholder, or the push has not been published yet |
-| "The password has not been set on the server yet" | `APP_PASSWORD` is missing or shorter than 10 characters in Script Properties |
-| "Sign-in is paused for 15 minutes" | 5 wrong passwords in a row. It clears by itself after 15 minutes |
-| Correct password rejected | Typo, or the property has a trailing space. Re-paste it in Script Properties |
+| "The password has not been set up on the server yet" | `initSetup` has not been run, or `INITIAL_PASSWORD` was missing or under 12 characters when it ran |
+| Sign-in feels slow after a mistake | Deliberate: each failed attempt adds a wait (2s up to 10s). It resets after a good login or 15 quiet minutes |
+| Correct password rejected | Typo, or the password was changed in Settings. To recover, use the "Forgot the password" steps above |
 | "The server sent a response the page could not read" | `SCRIPT_URL` is wrong, or the deployment is not set to Execute as **Me** / Access **Anyone** |
 | Import refused: archive error | `ARCHIVE_FOLDER_ID` missing or wrong, or the deploying account cannot write to that folder |
 | "Another import or tag change is in progress" | Two writes at once. Wait a few seconds and retry |

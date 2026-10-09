@@ -11,11 +11,12 @@ function brand() {
 }
 
 // Full app frame after sign-in. Returns the element the active screen draws into.
-export function mountShell(root, { email, mock, onSignOut }) {
+export function mountShell(root, { name, mock, onSignOut }) {
   clear(root);
   const links = {
     library: h('a', { class: 'nav-link', href: '#/library' }, 'Library'),
     upload: h('a', { class: 'nav-link', href: '#/upload' }, 'Upload'),
+    settings: h('a', { class: 'nav-link', href: '#/settings' }, 'Settings'),
   };
   const main = h('main', { class: 'view', id: 'view', tabindex: '-1' });
   root.appendChild(h('div', { class: 'shell' },
@@ -23,10 +24,10 @@ export function mountShell(root, { email, mock, onSignOut }) {
     h('header', { class: 'topbar' },
       brand(),
       h('nav', { class: 'nav', 'aria-label': 'Main' },
-        links.library, links.upload,
+        links.library, links.upload, links.settings,
         h('div', { class: 'user' },
-          h('span', { class: 'mono dim' }, email),
-          mock ? null : h('button', { type: 'button', class: 'btn-ghost mono', onclick: onSignOut }, 'SIGN OUT')))),
+          h('span', { class: 'mono dim', title: 'Name entered at sign-in' }, name),
+          h('button', { type: 'button', class: 'btn-ghost mono', onclick: onSignOut }, 'SIGN OUT')))),
     main));
   return {
     main,

@@ -4,11 +4,11 @@ import { computeCommit, computeSetTags } from '../src/import/commit.js';
 import { applyChanges, emptyLibrary, toClientLibrary } from '../src/import/apply.js';
 
 let counter = 0;
-export function makeCtx(email = 'tester@example.test') {
+export function makeCtx(user = 'Test User') {
   counter++;
   return {
     now: '2026-10-09T12:00:' + String(counter % 60).padStart(2, '0') + '.000Z',
-    email,
+    user,
     importId: 'i_' + String(counter).padStart(8, '0'),
     newId: () => 'a_' + Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0'),
   };

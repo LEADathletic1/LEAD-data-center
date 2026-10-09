@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const PASSWORD = 'correct horse battery staple';
+export const NAME = 'Coach Test';
 
 class FakeRange {
   constructor(sheet, r, c, nr, nc) { Object.assign(this, { sheet, r, c, nr, nc }); }
@@ -46,17 +47,19 @@ class FakeSheet {
   dataRows() { return this.cells.slice(1).filter((r) => r && r.length); }
 }
 
-export function createGas({ password = PASSWORD, archive = true } = {}) {
+export function createGas({ password = PASSWORD, archive = true, setup = true } = {}) {
   const sheets = new Map();
   const props = {};
-  if (password !== null) props.APP_PASSWORD = password;
   if (archive) props.ARCHIVE_FOLDER_ID = 'archive-folder';
+  const logs = [];
   const cacheStore = new Map();
-  const state = { archived: [], locked: false, lockFails: false, lockCalls: 0 };
+  const state = { archived: [], locked: false, lockFails: false, lockCalls: 0, sleeps: [] };
 
   const Utilities = {
     computeDigest: (_alg, s) => Array.from(crypto.createHash('sha256').update(s).digest()),
-    base64EncodeWebSafe: (bytes) => Buffer.from(bytes).toString('base64url'),
+    computeHmacSha256Signature: (v, key) => Array.from(crypto.createHmac('sha256', key).update(v).digest()),
+    sleep: (ms) => { state.sleeps.push(ms); },
+    base64EncodeWebSafe: (x) => Buffer.from(typeof x === 'string' ? Buffer.from(x, 'utf8') : x).toString('base64url'),
     base64DecodeWebSafe: (s) => Array.from(Buffer.from(s, 'base64url')),
     newBlob: (bytes) => ({ getDataAsString: () => Buffer.from(bytes).toString('utf8') }),
     getUuid: () => crypto.randomUUID(),
@@ -70,9 +73,14 @@ export function createGas({ password = PASSWORD, archive = true } = {}) {
     getId: () => 'ss-id',
   };
   const sandbox = {
-    console: { log() {}, error() {} },
+    console: { log: (...a) => logs.push(a.join(' ')), error: (...a) => logs.push(a.join(' ')) },
     Date, Math, JSON, Number, String, Array, Object, Map, Set, Error, RegExp, isFinite,
-    PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => (k in props ? props[k] : null) }) },
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty: (k) => (k in props ? props[k] : null),
+      setProperty: (k, v) => { props[k] = String(v); },
+      setProperties: (o) => { for (const k of Object.keys(o)) props[k] = String(o[k]); },
+      deleteProperty: (k) => { delete props[k]; },
+    }) },
     CacheService: { getScriptCache: () => ({ get: (k) => cacheStore.get(k) ?? null, put: (k, v) => { cacheStore.set(k, v); }, remove: (k) => { cacheStore.delete(k); } }) },
     Utilities,
     LockService: {
@@ -90,11 +98,14 @@ export function createGas({ password = PASSWORD, archive = true } = {}) {
   vm.runInContext(readFileSync(join(root, 'apps-script/Code.gs'), 'utf8'), sandbox, { filename: 'Code.gs' });
 
   const call = (body) => JSON.parse(sandbox.doPost({ postData: { contents: typeof body === 'string' ? body : JSON.stringify(body) } }).getContent());
+  // First-time setup, exactly as Blair does it: set INITIAL_PASSWORD, run initSetup().
+  if (setup && password !== null) { props.INITIAL_PASSWORD = password; sandbox.initSetup(); }
+  const login = (pw = PASSWORD, displayName = NAME) => call({ action: 'login', password: pw, displayName });
   // Signs in with the right password and returns a session token.
-  const goodToken = () => {
-    const r = call({ action: 'login', password: props.APP_PASSWORD });
+  const goodToken = (displayName = NAME) => {
+    const r = login(PASSWORD, displayName);
     if (!r.ok) throw new Error('test login failed: ' + JSON.stringify(r));
     return r.token;
   };
-  return { sandbox, sheets, props, state, call, goodToken, cacheStore };
+  return { sandbox, sheets, props, state, call, login, goodToken, cacheStore, logs };
 }

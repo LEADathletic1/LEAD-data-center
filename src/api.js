@@ -10,10 +10,12 @@ export class ApiError extends Error {
 }
 
 const MESSAGES = {
-  auth: 'That password is not correct.',
-  auth_expired: 'Your sign-in expired. Please sign in again.',
-  locked: 'Too many wrong passwords. Sign-in is paused for 15 minutes.',
-  not_configured_server: 'The password has not been set on the server yet. See SETUP.md.',
+  auth: 'Your sign-in is not valid. Please sign in again.',
+  auth_expired: 'Your sign-in ended. Please sign in again.',
+  bad_password: 'Incorrect password',
+  name_required: 'Enter your name',
+  weak_password: 'The new password must be at least 12 characters.',
+  not_configured: 'The password has not been set up on the server yet. Run initSetup (see SETUP.md).',
   busy: 'Another import or tag change is in progress. Wait a few seconds and try again.',
   archive_failed: 'The raw file could not be archived to Drive, so nothing was written. Check ARCHIVE_FOLDER_ID in Script Properties.',
   unresolved_matches: 'Some name matches still need a decision. Nothing was written.',
@@ -21,7 +23,7 @@ const MESSAGES = {
   bad_tag: 'That tag name is not allowed.',
   network: 'Could not reach the server. Check your connection and try again.',
   bad_response: 'The server sent a response the page could not read. Check the Apps Script deployment URL in config.js.',
-  not_configured: 'SCRIPT_URL in config.js is still a placeholder. See SETUP.md.',
+  script_url: 'SCRIPT_URL in config.js is still a placeholder. See SETUP.md.',
 };
 
 export { configured as isConfigured };
@@ -41,7 +43,7 @@ function configured() {
 }
 
 async function post(action, params, useToken = true) {
-  if (typeof SCRIPT_URL !== 'string' || SCRIPT_URL.indexOf('REPLACE_WITH') >= 0) throw new ApiError('not_configured', MESSAGES.not_configured);
+  if (typeof SCRIPT_URL !== 'string' || SCRIPT_URL.indexOf('REPLACE_WITH') >= 0) throw new ApiError('script_url', MESSAGES.script_url);
   const token = useToken ? auth.getToken() : null;
   if (useToken && !token) throw new ApiError('auth_expired', MESSAGES.auth_expired);
   let resp;
@@ -66,11 +68,22 @@ export async function call(action, params = {}) {
   return data;
 }
 
-export async function login(password) {
-  if (isMock()) { auth.setToken('mock'); return; }
-  const data = await post('login', { password }, false);
-  if (!data.ok) throw new ApiError(data.error || 'auth', data.error === 'not_configured' ? MESSAGES.not_configured_server : MESSAGES[data.error] || 'Sign-in failed.', data);
+// Returns the display name. Mock mode accepts any password (but still needs a name).
+export async function login(password, displayName) {
+  const name = String(displayName || '').trim();
+  if (isMock()) {
+    if (!name) throw new ApiError('name_required', MESSAGES.name_required);
+    auth.setToken(btoa(unescape(encodeURIComponent(JSON.stringify({ name })))) + '.mock');
+    return name;
+  }
+  const data = await post('login', { password, displayName: name }, false);
+  if (!data.ok) throw new ApiError(data.error || 'auth', MESSAGES[data.error] || 'Sign-in failed.', data);
   auth.setToken(data.token);
+  return data.name;
+}
+
+export async function changePassword(currentPassword, newPassword) {
+  return call('changePassword', { currentPassword, newPassword });
 }
 
 export const whoami = () => call('whoami');

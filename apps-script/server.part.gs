@@ -9,9 +9,9 @@ const SHEET_DECISIONS = 'Name Decisions';
 
 const HEADERS_ = {
   'Athletes': ['athlete_id', 'name', 'tags', 'aliases', 'first_seen', 'source'],
-  'Import Log': ['import_id', 'timestamp', 'user_email', 'file_name', 'tags_applied', 'new_points', 'duplicates_skipped', 'time_corrections', 'new_athletes', 'matches_merged', 'matches_added_as_new'],
-  'Corrections': ['import_id', 'timestamp', 'athlete_id', 'test', 'date', 'old_time', 'new_time'],
-  'Tag Log': ['timestamp', 'user_email', 'action', 'tag', 'athlete_ids'],
+  'Import Log': ['import_id', 'timestamp', 'user_name', 'file_name', 'tags_applied', 'new_points', 'duplicates_skipped', 'time_corrections', 'new_athletes', 'matches_merged', 'matches_added_as_new'],
+  'Corrections': ['import_id', 'timestamp', 'athlete_id', 'test', 'date', 'old_time', 'new_time', 'user_name'],
+  'Tag Log': ['timestamp', 'user_name', 'action', 'tag', 'athlete_ids'],
   'Name Decisions': ['pair_key', 'athlete_id', 'incoming_name', 'decision', 'decided_by', 'timestamp'],
 };
 for (const tab of TEST_TABS) HEADERS_[tab] = ['athlete_id', 'date', 'time', 'source', 'import_id'];
@@ -32,15 +32,16 @@ function doPost(e) {
   let body;
   try { body = JSON.parse(e.postData.contents); } catch (err) { return json_({ ok: false, error: 'auth' }); }
   if (!body || typeof body !== 'object') return json_({ ok: false, error: 'auth' });
-  if (body.action === 'login') return json_(login_(body.password));
+  if (body.action === 'login') return json_(login_(body.password, body.displayName));
   const auth = verifySession_(body.sessionToken);
   if (!auth.ok) return json_({ ok: false, error: auth.error });
   try {
     switch (body.action) {
-      case 'whoami': return json_({ ok: true });
+      case 'whoami': return json_({ ok: true, name: auth.name });
+      case 'changePassword': return json_(changePassword_(body));
       case 'getLibrary': return json_(getLibrary_());
-      case 'commitImport': return json_(commitImport_(body, SHARED_USER_));
-      case 'setTags': return json_(setTags_(body, SHARED_USER_));
+      case 'commitImport': return json_(commitImport_(body, auth.name));
+      case 'setTags': return json_(setTags_(body, auth.name));
       case 'mergeAthletes': return json_({ ok: false, error: 'not_implemented' });
       default: return json_({ ok: false, error: 'unknown_action' });
     }
@@ -55,55 +56,131 @@ function json_(obj) {
 }
 
 // ---------- Auth: one shared password, checked on the server ----------
-// The password lives in the APP_PASSWORD Script Property. `login` trades it for a random session
-// token (kept in CacheService, 6 hours at most). Every other request must carry a live token.
-// Changing APP_PASSWORD signs everyone out. Repeated wrong guesses lock logins for 15 minutes.
+// Script Properties (set by initSetup, never by hand except INITIAL_PASSWORD):
+//   PASSWORD_HASH     SHA-256 of salt + password
+//   PASSWORD_SALT     random
+//   PASSWORD_VERSION  integer; a token is valid only for the version it was issued under
+//   SESSION_SECRET    random key used to sign session tokens
+//   INITIAL_PASSWORD  temporary: read and deleted by initSetup()
+// The password is never stored, logged, or sent back. Display names are self-entered and unverified.
 
-const SHARED_USER_ = 'shared-password';
-const MIN_PASSWORD_LENGTH_ = 10;
-const SESSION_TTL_ = 21600; // CacheService maximum
-const MAX_FAILS_ = 5;
-const LOCK_SECONDS_ = 900;
+const MIN_PASSWORD_LENGTH_ = 12;
+const SESSION_DAYS_ = 7;
+const FAIL_WINDOW_SECONDS_ = 900;
+const MAX_NAME_LENGTH_ = 40;
 
-function login_(password) {
-  const secret = PropertiesService.getScriptProperties().getProperty('APP_PASSWORD');
-  if (!secret || secret.length < MIN_PASSWORD_LENGTH_) return { ok: false, error: 'not_configured' };
+function props_() { return PropertiesService.getScriptProperties(); }
+
+function hashPassword_(salt, password) {
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + password);
+  return Utilities.base64EncodeWebSafe(bytes);
+}
+
+function randomString_() { return (Utilities.getUuid() + Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, ''); }
+
+// Run by hand from the Apps Script editor, once (and again to recover a forgotten password).
+// Put the new password in the INITIAL_PASSWORD Script Property first. It is deleted afterwards.
+function initSetup() {
+  const p = props_();
+  const initial = p.getProperty('INITIAL_PASSWORD');
+  if (!initial) throw new Error('Add a Script Property named INITIAL_PASSWORD first, then run initSetup again.');
+  if (initial.length < MIN_PASSWORD_LENGTH_) throw new Error('INITIAL_PASSWORD must be at least ' + MIN_PASSWORD_LENGTH_ + ' characters.');
+  storePassword_(initial);
+  p.deleteProperty('INITIAL_PASSWORD');
+  if (!p.getProperty('SESSION_SECRET')) p.setProperty('SESSION_SECRET', randomString_());
+  CacheService.getScriptCache().remove('login_fails');
+  console.log('Setup complete. Password version ' + p.getProperty('PASSWORD_VERSION') + '. INITIAL_PASSWORD was deleted.');
+}
+
+// Writes a new salt, hash and version. A new version signs every existing session out.
+function storePassword_(password) {
+  const p = props_();
+  const salt = randomString_();
+  const version = (Number(p.getProperty('PASSWORD_VERSION')) || 0) + 1;
+  p.setProperties({ PASSWORD_SALT: salt, PASSWORD_HASH: hashPassword_(salt, password), PASSWORD_VERSION: String(version) });
+}
+
+function isConfigured_() {
+  const p = props_();
+  return !!(p.getProperty('PASSWORD_HASH') && p.getProperty('PASSWORD_SALT') && p.getProperty('SESSION_SECRET') && p.getProperty('PASSWORD_VERSION'));
+}
+
+function passwordMatches_(password) {
+  const p = props_();
+  if (typeof password !== 'string' || password.length > 200) return false;
+  return safeEqual_(hashPassword_(p.getProperty('PASSWORD_SALT'), password), p.getProperty('PASSWORD_HASH'));
+}
+
+// Failed attempts slow every later attempt down: 2s, then 4, 6, 8 and 10s. The counter is shared
+// (there is only one password) and resets after 15 quiet minutes or a good login.
+function throttle_() {
+  const fails = Number(CacheService.getScriptCache().get('login_fails') || 0);
+  if (fails > 0) Utilities.sleep(Math.min(10, 2 * fails) * 1000);
+}
+function recordFailure_() {
   const cache = CacheService.getScriptCache();
-  if (cache.get('login_lock')) return { ok: false, error: 'locked' };
-  if (typeof password !== 'string' || password.length > 200 || !safeEqual_(password, secret)) {
-    const fails = Number(cache.get('login_fails') || 0) + 1;
-    if (fails >= MAX_FAILS_) { cache.put('login_lock', '1', LOCK_SECONDS_); cache.remove('login_fails'); }
-    else cache.put('login_fails', String(fails), LOCK_SECONDS_);
-    return { ok: false, error: 'auth' };
-  }
-  cache.remove('login_fails');
-  const token = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');
-  cache.put('sess_' + digest_(token), digest_(secret), SESSION_TTL_);
-  return { ok: true, token: token };
+  cache.put('login_fails', String(Number(cache.get('login_fails') || 0) + 1), FAIL_WINDOW_SECONDS_);
+}
+
+function cleanDisplayName_(v) {
+  return String(v === undefined || v === null ? '' : v).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_NAME_LENGTH_);
+}
+
+function login_(password, displayName) {
+  if (!isConfigured_()) return { ok: false, error: 'not_configured' };
+  const name = cleanDisplayName_(displayName);
+  if (!name) return { ok: false, error: 'name_required' };
+  throttle_();
+  if (!passwordMatches_(password)) { recordFailure_(); return { ok: false, error: 'bad_password' }; }
+  CacheService.getScriptCache().remove('login_fails');
+  return { ok: true, token: signToken_(name), name: name };
+}
+
+// base64(JSON {exp, ver, name}) + "." + base64(HMAC-SHA256 of the first part)
+function signToken_(name) {
+  const p = props_();
+  const payload = Utilities.base64EncodeWebSafe(JSON.stringify({
+    exp: Math.floor(Date.now() / 1000) + SESSION_DAYS_ * 86400,
+    ver: Number(p.getProperty('PASSWORD_VERSION')),
+    name: name,
+  }));
+  return payload + '.' + sign_(payload);
+}
+
+function sign_(payload) {
+  return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(payload, props_().getProperty('SESSION_SECRET')));
 }
 
 function verifySession_(token) {
-  if (!token || typeof token !== 'string' || token.length > 200) return { ok: false, error: 'auth' };
-  const secret = PropertiesService.getScriptProperties().getProperty('APP_PASSWORD');
-  if (!secret || secret.length < MIN_PASSWORD_LENGTH_) return { ok: false, error: 'auth' };
-  const stored = CacheService.getScriptCache().get('sess_' + digest_(token));
-  // A missing session may be an expired one, so ask the page to sign in again. No data either way.
-  if (!stored) return { ok: false, error: 'auth_expired' };
-  // The session is bound to the password it was issued under, so changing the password ends it.
-  if (!safeEqual_(stored, digest_(secret))) return { ok: false, error: 'auth_expired' };
-  return { ok: true };
+  if (!isConfigured_()) return { ok: false, error: 'auth' };
+  if (!token || typeof token !== 'string' || token.length > 1000) return { ok: false, error: 'auth' };
+  const parts = token.split('.');
+  if (parts.length !== 2 || !safeEqual_(parts[1], sign_(parts[0]))) return { ok: false, error: 'auth' };
+  let data;
+  try { data = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString()); } catch (err) { return { ok: false, error: 'auth' }; }
+  if (!data || typeof data.name !== 'string' || !data.name) return { ok: false, error: 'auth' };
+  // Signed correctly but out of date: expired, or the password has changed since. Ask to sign in again.
+  if (!(Number(data.exp) > Math.floor(Date.now() / 1000))) return { ok: false, error: 'auth_expired' };
+  if (Number(data.ver) !== Number(props_().getProperty('PASSWORD_VERSION'))) return { ok: false, error: 'auth_expired' };
+  return { ok: true, name: cleanDisplayName_(data.name) };
+}
+
+function changePassword_(body) {
+  const current = body.currentPassword, next = body.newPassword;
+  throttle_();
+  if (!passwordMatches_(current)) { recordFailure_(); return { ok: false, error: 'bad_password' }; }
+  if (typeof next !== 'string' || next.length < MIN_PASSWORD_LENGTH_ || next.length > 200) return { ok: false, error: 'weak_password', detail: 'The new password must be at least ' + MIN_PASSWORD_LENGTH_ + ' characters.' };
+  return withLock_(function () {
+    storePassword_(next); // bumps PASSWORD_VERSION: every session, including this one, is now invalid
+    return { ok: true };
+  });
 }
 
 function safeEqual_(a, b) {
-  const x = digest_(String(a)), y = digest_(String(b));
+  const x = String(a), y = String(b);
   let diff = x.length ^ y.length;
   for (let i = 0; i < x.length && i < y.length; i++) diff |= x.charCodeAt(i) ^ y.charCodeAt(i);
   return diff === 0;
-}
-
-function digest_(s) {
-  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, s);
-  return Utilities.base64EncodeWebSafe(bytes);
 }
 
 // ---------- Sheet helpers ----------
@@ -181,7 +258,7 @@ function readLibrary_() {
   const logRows = readRows_(SHEET_IMPORT_LOG, 11);
   const lr = logRows.length ? logRows[logRows.length - 1] : null;
   const lastImport = lr ? {
-    import_id: str_(lr[0]), timestamp: str_(lr[1]), user_email: str_(lr[2]), file_name: str_(lr[3]), tags_applied: str_(lr[4]),
+    import_id: str_(lr[0]), timestamp: str_(lr[1]), user_name: str_(lr[2]), file_name: str_(lr[3]), tags_applied: str_(lr[4]),
     new_points: Number(lr[5]), duplicates_skipped: Number(lr[6]), time_corrections: Number(lr[7]),
     new_athletes: Number(lr[8]), matches_merged: Number(lr[9]), matches_added_as_new: Number(lr[10]),
   } : null;
@@ -195,10 +272,10 @@ function getLibrary_() {
   return { ok: true, athletes: lib.athletes, points: points, tags: lib.tags, decisions: lib.decisions, lastImport: lib.lastImport, tests: TEST_TABS.slice() };
 }
 
-function ctx_(email) {
+function ctx_(user) {
   return {
     now: new Date().toISOString(),
-    email: email,
+    user: user,
     importId: 'i_' + hex8_(),
     newId: function () { return 'a_' + hex8_(); },
   };
@@ -253,11 +330,11 @@ function applyChanges_(lib, changes) {
     return [d.pair_key, d.athlete_id, d.incoming_name, d.decision, d.decided_by, d.timestamp];
   }));
   appendRows_(SHEET_TAG_LOG, (changes.tagLog || []).map(function (t) {
-    return [t.timestamp, t.user_email, t.action, t.tag, t.athlete_ids];
+    return [t.timestamp, t.user_name, t.action, t.tag, t.athlete_ids];
   }));
   if (changes.importLog) {
     const l = changes.importLog;
-    appendRows_(SHEET_IMPORT_LOG, [[l.import_id, l.timestamp, l.user_email, l.file_name, l.tags_applied, l.new_points, l.duplicates_skipped, l.time_corrections, l.new_athletes, l.matches_merged, l.matches_added_as_new]]);
+    appendRows_(SHEET_IMPORT_LOG, [[l.import_id, l.timestamp, l.user_name, l.file_name, l.tags_applied, l.new_points, l.duplicates_skipped, l.time_corrections, l.new_athletes, l.matches_merged, l.matches_added_as_new]]);
   }
 }
 
@@ -272,10 +349,10 @@ function archiveCsv_(importId, fileName, csv) {
 
 // ---------- Actions ----------
 
-function commitImport_(body, email) {
+function commitImport_(body, user) {
   return withLock_(function () {
     const lib = readLibrary_();
-    const c = ctx_(email);
+    const c = ctx_(user);
     const out = computeCommit(lib, body, c);
     if (!out.ok) return { ok: false, error: out.error, detail: out.detail };
     // Archive first: if it fails nothing is written, so every stored row traces back to a file.
@@ -285,10 +362,10 @@ function commitImport_(body, email) {
   });
 }
 
-function setTags_(body, email) {
+function setTags_(body, user) {
   return withLock_(function () {
     const lib = readLibrary_();
-    const out = computeSetTags(lib, body, ctx_(email));
+    const out = computeSetTags(lib, body, ctx_(user));
     if (!out.ok) return { ok: false, error: out.error, detail: out.detail };
     applyChanges_(lib, out.changes);
     const touched = {};

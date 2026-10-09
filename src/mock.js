@@ -7,15 +7,14 @@ import { parseLumin } from './parsers/lumin.js';
 import { analyze, buildPayload } from './import/plan.js';
 import { buildScenario } from '../test/fixtures/synthetic.js';
 
-const MOCK_EMAIL = 'mock@example.test';
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export function createMockBackend() {
   const lib = emptyLibrary();
   const scenario = buildScenario();
   let n = 0;
-  const ctx = (id) => ({
-    now: new Date().toISOString(), email: MOCK_EMAIL,
+  const ctx = () => ({
+    now: new Date().toISOString(), user: 'Mock user',
     importId: 'i_' + String(++n).padStart(8, '0'),
     newId: () => 'a_' + Math.random().toString(16).slice(2, 10).padEnd(8, '0'),
   });
@@ -29,7 +28,11 @@ export function createMockBackend() {
   applyChanges(lib, computeSetTags(lib, { athlete_ids: some, add: ['1More'], remove: [] }, ctx()).changes);
 
   return {
-    async whoami() { await delay(60); return { ok: true }; },
+    async whoami() { await delay(60); return { ok: true, name: 'Mock user' }; },
+    async changePassword({ newPassword }) {
+      await delay(120);
+      return typeof newPassword === 'string' && newPassword.length >= 12 ? { ok: true } : { ok: false, error: 'weak_password' };
+    },
     async getLibrary() { await delay(120); return { ok: true, ...toClientLibrary(lib) }; },
     async commitImport(payload) {
       await delay(250);

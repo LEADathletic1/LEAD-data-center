@@ -214,3 +214,6 @@ button:disabled.btn-ghost, button:disabled.btn-outline, button:disabled.btn-outl
 @media (prefers-reduced-motion: no-preference) {
   .btn-primary, .btn-ghost, .btn-outline, .chip-btn, .dropzone { transition: background-color 0.12s, border-color 0.12s, color 0.12s; }
 }
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+.panel.narrow { max-width: 460px; }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createGas, PASSWORD } from './gas-harness.js';
+import { createGas, PASSWORD, NAME } from './gas-harness.js';
 import { buildScenario, makeCsv } from './fixtures/synthetic.js';
 import { parseLumin } from '../src/parsers/lumin.js';
 import { analyze, computePlan, buildPayload } from '../src/import/plan.js';
@@ -23,12 +23,12 @@ test('Code.gs is up to date with src/ (run `npm run build:gas` if this fails)', 
   assert.equal(readFileSync(new URL('../apps-script/Code.gs', import.meta.url), 'utf8'), buildCodeGs());
 });
 
-test('a request with no session, a garbled body, or an unknown session returns no data', () => {
+test('a request with no session, a garbled body, or a bad session returns no data', () => {
   const gas = createGas();
-  for (const body of [{ action: 'getLibrary' }, { action: 'getLibrary', sessionToken: '' }, '{not json', 'null', { action: 'getLibrary', sessionToken: 'garbage' }, { action: 'getLibrary', sessionToken: 42 }]) {
+  for (const body of [{ action: 'getLibrary' }, { action: 'getLibrary', sessionToken: '' }, '{not json', 'null', { action: 'getLibrary', sessionToken: 'garbage' }, { action: 'getLibrary', sessionToken: 'a.b' }, { action: 'getLibrary', sessionToken: 42 }]) {
     const r = gas.call(body);
     assert.equal(r.ok, false);
-    assert.ok(r.error === 'auth' || r.error === 'auth_expired');
+    assert.equal(r.error, 'auth');
     assert.deepEqual(Object.keys(r).sort(), ['error', 'ok'], 'no data keys');
   }
   assert.equal(gas.sheets.size, 0, 'nothing was even touched');
@@ -36,61 +36,117 @@ test('a request with no session, a garbled body, or an unknown session returns n
 
 test('every data action is refused without a session', () => {
   const gas = createGas();
-  for (const action of ['whoami', 'getLibrary', 'commitImport', 'setTags', 'mergeAthletes']) {
+  for (const action of ['whoami', 'getLibrary', 'commitImport', 'setTags', 'mergeAthletes', 'changePassword']) {
     assert.equal(gas.call({ action }).ok, false, action);
   }
   assert.equal(gas.sheets.size, 0);
 });
 
-test('the right password gets a session; a wrong one does not', () => {
+test('login: right password returns a signed token carrying the name; wrong password is "bad_password"', () => {
   const gas = createGas();
-  assert.deepEqual(gas.call({ action: 'login', password: 'nope nope nope' }), { ok: false, error: 'auth' });
-  assert.deepEqual(gas.call({ action: 'login' }), { ok: false, error: 'auth' });
-  assert.deepEqual(gas.call({ action: 'login', password: { x: 1 } }), { ok: false, error: 'auth' });
-  const r = gas.call({ action: 'login', password: PASSWORD });
+  assert.deepEqual(gas.login('wrong wrong wrong', NAME), { ok: false, error: 'bad_password' });
+  assert.deepEqual(gas.call({ action: 'login', displayName: NAME }), { ok: false, error: 'bad_password' });
+  assert.deepEqual(gas.call({ action: 'login', password: { x: 1 }, displayName: NAME }), { ok: false, error: 'bad_password' });
+  assert.deepEqual(gas.login(PASSWORD, '   '), { ok: false, error: 'name_required' });
+  const r = gas.login(PASSWORD, '  Coach   Dana \n');
   assert.equal(r.ok, true);
-  assert.ok(r.token.length >= 60);
-  assert.equal(gas.call({ action: 'whoami', sessionToken: r.token }).ok, true);
+  assert.equal(r.name, 'Coach Dana');
+  const [payload, sig] = r.token.split('.');
+  const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
+  assert.deepEqual(Object.keys(data).sort(), ['exp', 'name', 'ver']);
+  assert.equal(data.name, 'Coach Dana');
+  assert.ok(sig.length > 20);
+  assert.equal(data.exp - Math.floor(Date.now() / 1000) > 6.9 * 86400, true, 'sessions last 7 days');
+  assert.equal(gas.call({ action: 'whoami', sessionToken: r.token }).name, 'Coach Dana');
   assert.equal(JSON.stringify(r).includes(PASSWORD), false, 'the password is never echoed');
 });
 
-test('repeated wrong guesses lock logins, even for the right password, until the lock expires', () => {
-  const gas = createGas();
-  for (let i = 0; i < 5; i++) assert.equal(gas.call({ action: 'login', password: 'guess ' + i + ' xxxxx' }).error, 'auth');
-  assert.deepEqual(gas.call({ action: 'login', password: PASSWORD }), { ok: false, error: 'locked' });
-  gas.cacheStore.delete('login_lock'); // the 15 minute cache entry expiring
-  assert.equal(gas.call({ action: 'login', password: PASSWORD }).ok, true);
-});
-
-test('a successful login resets the failure count', () => {
-  const gas = createGas();
-  for (let i = 0; i < 4; i++) gas.call({ action: 'login', password: 'wrong wrong ' + i });
-  assert.equal(gas.call({ action: 'login', password: PASSWORD }).ok, true);
-  for (let i = 0; i < 4; i++) gas.call({ action: 'login', password: 'wrong again ' + i });
-  assert.equal(gas.call({ action: 'login', password: PASSWORD }).ok, true, 'not locked: counter restarted');
-});
-
-test('an expired session says auth_expired so the page can ask for the password again', () => {
+test('tampered, re-signed-with-wrong-key, expired and out-of-date tokens are refused', () => {
   const gas = createGas();
   const t = gas.goodToken();
-  gas.cacheStore.clear(); // CacheService dropped it after its lifetime
-  assert.deepEqual(gas.call({ action: 'getLibrary', sessionToken: t }), { ok: false, error: 'auth_expired' });
+  const [payload, sig] = t.split('.');
+  const edit = (patch) => Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(payload, 'base64url').toString()), ...patch })).toString('base64url');
+  assert.equal(gas.call({ action: 'whoami', sessionToken: edit({ name: 'Someone Else' }) + '.' + sig }).error, 'auth', 'edited name');
+  assert.equal(gas.call({ action: 'whoami', sessionToken: edit({ exp: 9999999999 }) + '.' + sig }).error, 'auth', 'edited expiry');
+  assert.equal(gas.call({ action: 'whoami', sessionToken: payload + '.' + sig.slice(0, -2) + 'xx' }).error, 'auth', 'bad signature');
+  // Correctly signed, but old: ask the page to sign in again.
+  const signed = (patch) => { const p = edit(patch); return p + '.' + gas.sandbox.sign_(p); };
+  assert.equal(gas.call({ action: 'whoami', sessionToken: signed({}) }).ok, true, 'control: harness signing works');
+  assert.equal(gas.call({ action: 'whoami', sessionToken: signed({ exp: Math.floor(Date.now() / 1000) - 5 }) }).error, 'auth_expired');
+  assert.equal(gas.call({ action: 'whoami', sessionToken: signed({ ver: 0 }) }).error, 'auth_expired');
 });
 
-test('changing the password signs everyone out', () => {
+test('failed logins are throttled: 2s, 4s, 6s, 8s, then 10s at most; a good login resets it', () => {
+  const gas = createGas();
+  for (let i = 0; i < 7; i++) gas.login('guess ' + i + ' xxxxxxxx');
+  assert.deepEqual(gas.state.sleeps.map((ms) => ms / 1000), [2, 4, 6, 8, 10, 10]);
+  gas.state.sleeps.length = 0;
+  assert.equal(gas.login(PASSWORD).ok, true, 'still able to sign in with the right password');
+  assert.deepEqual(gas.state.sleeps, [10000], 'the attempt itself is delayed');
+  gas.state.sleeps.length = 0;
+  gas.login('wrong again xxx');
+  assert.deepEqual(gas.state.sleeps, [], 'counter was reset by the good login');
+  gas.cacheStore.clear(); // 15 quiet minutes
+  gas.login('x'.repeat(14));
+  assert.deepEqual(gas.state.sleeps, []);
+});
+
+test('changePassword needs a valid session and the current password, enforces 12 characters, and signs everyone out', () => {
+  const gas = createGas();
+  const t1 = gas.goodToken('Coach A');
+  const t2 = gas.goodToken('Coach B');
+  const next = 'a brand new passphrase';
+  assert.equal(gas.call({ action: 'changePassword', currentPassword: PASSWORD, newPassword: next }).error, 'auth', 'no session');
+  assert.equal(gas.call({ action: 'changePassword', sessionToken: t1, currentPassword: 'not it at all', newPassword: next }).error, 'bad_password');
+  assert.equal(gas.call({ action: 'changePassword', sessionToken: t1, currentPassword: PASSWORD, newPassword: 'too short' }).error, 'weak_password');
+  assert.equal(gas.call({ action: 'changePassword', sessionToken: t1, currentPassword: PASSWORD, newPassword: 'x'.repeat(11) }).error, 'weak_password');
+  assert.equal(gas.call({ action: 'whoami', sessionToken: t1 }).ok, true, 'refused changes leave sessions alone');
+  const ok = gas.call({ action: 'changePassword', sessionToken: t1, currentPassword: PASSWORD, newPassword: next });
+  assert.deepEqual(ok, { ok: true });
+  for (const t of [t1, t2]) assert.equal(gas.call({ action: 'whoami', sessionToken: t }).error, 'auth_expired', 'every session ends, including the changer');
+  assert.equal(gas.login(PASSWORD).error, 'bad_password');
+  assert.equal(gas.call({ action: 'login', password: next, displayName: NAME }).ok, true);
+});
+
+test('initSetup: stores a salted hash, deletes INITIAL_PASSWORD, and re-running it recovers a lost password', () => {
+  const gas = createGas();
+  assert.equal('INITIAL_PASSWORD' in gas.props, false);
+  for (const k of ['PASSWORD_HASH', 'PASSWORD_SALT', 'PASSWORD_VERSION', 'SESSION_SECRET']) assert.ok(gas.props[k], k);
+  assert.equal(gas.props.PASSWORD_VERSION, '1');
+  const t = gas.goodToken();
+  const secret = gas.props.SESSION_SECRET;
+  gas.props.INITIAL_PASSWORD = 'recovery passphrase 99';
+  gas.sandbox.initSetup();
+  assert.equal('INITIAL_PASSWORD' in gas.props, false);
+  assert.equal(gas.props.PASSWORD_VERSION, '2');
+  assert.equal(gas.props.SESSION_SECRET, secret, 'secret kept');
+  assert.equal(gas.call({ action: 'whoami', sessionToken: t }).error, 'auth_expired', 'old sessions end');
+  assert.equal(gas.login(PASSWORD).error, 'bad_password');
+  assert.equal(gas.call({ action: 'login', password: 'recovery passphrase 99', displayName: NAME }).ok, true);
+  gas.props.INITIAL_PASSWORD = 'short';
+  assert.throws(() => gas.sandbox.initSetup(), /at least 12/);
+});
+
+test('before initSetup runs, nobody can sign in or read anything', () => {
+  const gas = createGas({ setup: false });
+  assert.deepEqual(gas.call({ action: 'login', password: PASSWORD, displayName: NAME }), { ok: false, error: 'not_configured' });
+  assert.equal(gas.call({ action: 'getLibrary', sessionToken: 'a.b' }).ok, false);
+});
+
+test('no plaintext password exists in code, properties, logs, responses or the Sheet', () => {
   const gas = createGas();
   const t = gas.goodToken();
-  assert.equal(gas.call({ action: 'whoami', sessionToken: t }).ok, true);
-  gas.props.APP_PASSWORD = 'a brand new passphrase';
-  assert.equal(gas.call({ action: 'whoami', sessionToken: t }).ok, false);
-});
-
-test('no password set, or one that is too short, means nobody gets in', () => {
-  for (const password of [null, '', 'short']) {
-    const gas = createGas({ password });
-    assert.equal(gas.call({ action: 'login', password: password || '' }).ok, false);
-    assert.equal(gas.call({ action: 'getLibrary', sessionToken: 'x' }).ok, false);
-  }
+  gas.login('some wrong guess');
+  gas.call({ action: 'commitImport', sessionToken: t, ...payloadFor(gas, t, s.csvA) });
+  gas.call({ action: 'changePassword', sessionToken: gas.goodToken(), currentPassword: 'nope nope nope', newPassword: 'x'.repeat(14) });
+  const everything = JSON.stringify({
+    props: gas.props, logs: gas.logs, cache: [...gas.cacheStore.entries()],
+    sheets: [...gas.sheets.values()].map((sh) => sh.cells), writes: [...gas.sheets.values()].map((sh) => sh.writeLog),
+  });
+  assert.equal(everything.includes(PASSWORD), false);
+  assert.equal('INITIAL_PASSWORD' in gas.props, false, 'the temporary property is gone');
+  assert.equal(readFileSync(new URL('../apps-script/Code.gs', import.meta.url), 'utf8').includes(PASSWORD), false);
+  assert.equal(/INITIAL_PASSWORD|APP_PASSWORD/.test(JSON.stringify(gas.call({ action: 'getLibrary', sessionToken: t }))), false);
 });
 
 test('mergeAthletes is reserved for phase 2', () => {
@@ -119,6 +175,24 @@ test('import end to end: writes, archives, logs; the same file again writes zero
   const rowsAfter = ['10 Yard', '30 Yard', 'Athletes', 'Corrections'].map((n) => gas.sheets.get(n).dataRows().length);
   assert.deepEqual(rowsAfter, rowsBefore);
   assert.equal(gas.sheets.get('Import Log').dataRows().length, 2, 'the attempt is still logged');
+});
+
+test('the signed-in display name is recorded in Import Log, Tag Log and Corrections', () => {
+  const gas = createGas();
+  const t = gas.goodToken('Coach Dana');
+  gas.call({ action: 'commitImport', sessionToken: t, ...payloadFor(gas, t, s.csvA) });
+  gas.call({ action: 'commitImport', sessionToken: t, ...payloadFor(gas, t, s.csvB, { decide: { 'michael tavarez': 'merge', 'nathen okafor': 'new' } }) });
+  const ids = gas.call({ action: 'getLibrary', sessionToken: t }).athletes.slice(0, 2).map((a) => a.id);
+  gas.call({ action: 'setTags', sessionToken: t, athlete_ids: ids, add: ['Camp'] });
+  const header = (n) => gas.sheets.get(n).cells[0];
+  for (const name of ['Import Log', 'Tag Log', 'Corrections']) {
+    const col = header(name).indexOf('user_name');
+    assert.ok(col >= 0, name + ' has a user_name column');
+    const rows = gas.sheets.get(name).dataRows();
+    assert.ok(rows.length > 0);
+    assert.ok(rows.every((r) => r[col] === 'Coach Dana'), name);
+  }
+  assert.ok(gas.sheets.get('Name Decisions').dataRows().every((r) => r[4] === 'Coach Dana'));
 });
 
 test('overlap, a corrected time, merge decisions and aliases all land in the right tabs', () => {
